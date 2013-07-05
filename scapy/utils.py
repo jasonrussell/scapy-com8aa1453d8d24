@@ -487,6 +487,8 @@ class RawPcapReader(BasePcapReader):
     """A stateful pcap reader. Each packet is returned as a string"""
 
     def __init__(self, filename):
+        self.ntarformat = False
+        self.ntarehblist = []
         self.filename = filename
         try:
             self.f = gzip.open(filename,"rb")
@@ -494,18 +496,99 @@ class RawPcapReader(BasePcapReader):
         except IOError:
             self.f = open(filename,"rb")
             magic = self.f.read(4)
-        if magic == "\xa1\xb2\xc3\xd4": #big endian
+
+        # determine endianness 
+        if sys.byteorder == "little":
+            # little endian
+            self.endian = "<"
+        else:
+            # big endian
+            self.endian = ">"
+
+        if magic == "\x0a\x0d\x0d\x0a": # ntar format
+            self.ntarformat = True
+            # go back to beginning and note this is ntar
+            self.f.seek(0,0)
+            myblockheader = self.ReadBlockHeader()
+            while myblockheader is not None:
+               ispacketblock = False
+               isinterfacedescriptionblock = False
+
+               # for debugging and potential future implementation
+               if myblockheader.blockType == 1:
+                   #print "Interface Description Block" 
+                   isinterfacedescriptionblock = True
+               #elif myblockheader.blockType == 2:
+               #    print "Packet Block"
+               #elif myblockheader.blockType == 3:
+               #    print "Simple Packet Block"
+               #elif myblockheader.blockType == 4:
+               #    print "Name Resolution Block"
+               #elif myblockheader.blockType == 5:
+               #    print "Interface Statistics Block"
+               elif myblockheader.blockType == 6:
+               #    print "Enhanced Packet Block"
+                   ispacketblock = True
+               #elif myblockheader.blockType == 168627466:
+               #    print "Section Header Block"
+               #else:
+               #    print "Unknown Block: " + str(myblockheader.blockType)
+
+               #print "Reported Block Length: " + str(myblockheader.blockLength)
+
+               adjustedblocklength = myblockheader.blockLength
+
+               #print "Adjusted Block Length: " + str(adjustedblocklength)
+               
+               if adjustedblocklength%4 == 0:
+                   pass
+                   #print "No pad bytes"
+               elif adjustedblocklength%4 == 1:
+                   adjustedblocklength += 3
+                   #print "3 pad bytes"
+               elif adjustedblocklength%4 == 2:
+                   adjustedblocklength += 2
+                   #print "2 pad bytes"
+               elif adjustedblocklength%4 == 3:
+                   #print "1 pad byte"
+                   adjustedblocklength += 1
+               else:
+                   pass
+
+               datablock = self.f.read(min(adjustedblocklength-8,4096))
+
+               # is packet block
+               if isinterfacedescriptionblock:
+                   idb = self.ReadInterfaceDescriptionBlock(myblockheader,datablock) 
+                   self.linktype = idb.linktype
+               
+               if ispacketblock:
+                   if myblockheader.blockType == 6:
+                      ehb = self.ReadEnhancedPacketBlock(myblockheader,datablock)
+                      self.ntarehblist.append(ehb)
+                      #print "Adding to list: now at " + str(len(self.ntarehblist))
+                  
+                       # enhanced packet block
+               
+               #else:
+                   #self.f.read(adjustedblocklength-8)
+               #    self.f.read(min(adjustedblocklength-8,4096))
+
+               myblockheader = self.ReadBlockHeader()
+                
+        elif magic == "\xa1\xb2\xc3\xd4": #big endian
             self.endian = ">"
         elif  magic == "\xd4\xc3\xb2\xa1": #little endian
             self.endian = "<"
         else:
             raise Scapy_Exception("Not a pcap capture file (bad magic)")
-        hdr = self.f.read(20)
-        if len(hdr)<20:
-            raise Scapy_Exception("Invalid pcap file (too short)")
-        vermaj,vermin,tz,sig,snaplen,linktype = struct.unpack(self.endian+"HHIIII",hdr)
+        if not self.ntarformat:
+            hdr = self.f.read(20)
+            if len(hdr)<20:
+                raise Scapy_Exception("Invalid pcap file (too short)")
+            vermaj,vermin,tz,sig,snaplen,linktype = struct.unpack(self.endian+"HHIIII",hdr)
 
-        self.linktype = linktype
+            self.linktype = linktype
 
 
 
@@ -519,18 +602,60 @@ class RawPcapReader(BasePcapReader):
             raise StopIteration
         return pkt
 
+    def ReadEnhancedPacketBlock(self,blockheader,inbuffer):
+        numpointer = 0
+        nextchunk = inbuffer[numpointer:20] 
+        interfaceid, hightimestamp, lowtimestamp, caplen, packetlen = struct.unpack(self.endian+"IIIII",nextchunk)
+        numpointer = 20
+        caplenend = numpointer + caplen
+        packetdata = inbuffer[numpointer:caplenend]
+        
+        return NTarEnhancedPacketBlock(blockheader,interfaceid, hightimestamp, lowtimestamp, caplen, packetlen,packetdata)
+
+    def ReadInterfaceDescriptionBlock(self,blockheader,inbuffer):
+        numpointer = 0
+        nextchunk = inbuffer[numpointer:8]
+        linktype,reserved,snaplen = struct.unpack(self.endian+"HHI",nextchunk)
+        numpointer = 8
+        #while numpointer < len(inbuffer):
+        #    numpointer = ReadOptionsBlock(numpointer)
+        return NTarInterfaceDescriptionBlock(blockheader,linktype,snaplen,[])
+        
+        #return None
+
+    def ReadOptionsBlock(self,numpointer):
+        numpointer += 1
+        return numpointer
+
+    def ReadBlockHeader(self):
+        """ Returns an NTar BlockHeader """
+        inbuffer = self.f.read(8)
+        #print "Byte header read: " + ':'.join("{0:x}".format(ord(c)) for c in inbuffer)
+        if len(inbuffer) < 8:
+            return None
+        else:
+            blocktype, blocklength = struct.unpack(self.endian+"II",inbuffer)
+            blockheader = NTarBlockHeader(blocktype,blocklength)
+            return blockheader
 
     def read_packet(self, size=MTU):
         """return a single packet read from the file
         
         returns None when no more packets are available
         """
-        hdr = self.f.read(16)
-        if len(hdr) < 16:
-            return None
-        sec,usec,caplen,wirelen = struct.unpack(self.endian+"IIII", hdr)
-        s = self.f.read(caplen)[:MTU]
-        return s,(sec,usec,wirelen) # caplen = len(s)
+        if not self.ntarformat:
+            hdr = self.f.read(16)
+            if len(hdr) < 16:
+                return None
+            sec,usec,caplen,wirelen = struct.unpack(self.endian+"IIII", hdr)
+            s = self.f.read(caplen)[:MTU]
+            return s,(sec,usec,wirelen) # caplen = len(s)
+        else:
+            if len(self.ntarehblist) != 0:
+                ehb = self.ntarehblist.pop(0)
+                return ehb.packetdata,(ehb.hightimestamp,ehb.lowtimestamp,ehb.packetlen)
+            else:
+                return None
         
     def skip_packets(self, skip):
         while skip:
@@ -816,4 +941,33 @@ def make_lined_table(*args, **kargs):
 
 def make_tex_table(*args, **kargs):
     __make_table(lambda l: "%s", lambda l: "& %s", "\\\\", seplinefunc=lambda a,x:"\\hline", *args, **kargs)
+
+class NTarBlockHeader:
+    def __init__(self,blocktype,blocklength):
+        self.blockType = blocktype
+        self.blockLength = blocklength
+
+class NTarOptionBlock:
+    def __init__(self,optioncode,optionlength,optionvalue):
+        self.optioncode = optioncode
+        self.optionlength = optionlength
+        self.optionvalue = optionvalue
+
+class NTarEnhancedPacketBlock:
+    def __init__(self,blockheader,interfaceid, hightimestamp, lowtimestamp, caplen, packetlen,packetdata):
+        self.blockheader = blockheader
+        self.interfaceid = interfaceid
+        self.hightimestamp = hightimestamp
+        self.lowtimestamp = lowtimestamp
+        self.caplen = caplen
+        self.packetlen = packetlen
+        self.packetdata = packetdata
+
+class NTarInterfaceDescriptionBlock:
+
+    def __init__(self,blockheader,linktype,snaplen,options):
+        self.blockheader = blockheader
+        self.linktype = linktype
+        self.snaplen = snaplen
+        self.options = options
 
