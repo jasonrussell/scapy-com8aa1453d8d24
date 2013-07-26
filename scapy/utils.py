@@ -514,43 +514,23 @@ class RawPcapReader(BasePcapReader):
                ispacketblock = False
                isinterfacedescriptionblock = False
 
-               # for debugging and potential future implementation
+               # registers as interface description block
+               # (for linktype)
                if myblockheader.blockType == 1:
-                   #print "Interface Description Block" 
                    isinterfacedescriptionblock = True
-               #elif myblockheader.blockType == 2:
-               #    print "Packet Block"
-               #elif myblockheader.blockType == 3:
-               #    print "Simple Packet Block"
-               #elif myblockheader.blockType == 4:
-               #    print "Name Resolution Block"
-               #elif myblockheader.blockType == 5:
-               #    print "Interface Statistics Block"
+               # for enhanced packet block
                elif myblockheader.blockType == 6:
-               #    print "Enhanced Packet Block"
                    ispacketblock = True
-               #elif myblockheader.blockType == 168627466:
-               #    print "Section Header Block"
-               #else:
-               #    print "Unknown Block: " + str(myblockheader.blockType)
-
-               #print "Reported Block Length: " + str(myblockheader.blockLength)
-
                adjustedblocklength = myblockheader.blockLength
 
-               #print "Adjusted Block Length: " + str(adjustedblocklength)
-               
+               # necessary block offsets
                if adjustedblocklength%4 == 0:
                    pass
-                   #print "No pad bytes"
                elif adjustedblocklength%4 == 1:
                    adjustedblocklength += 3
-                   #print "3 pad bytes"
                elif adjustedblocklength%4 == 2:
                    adjustedblocklength += 2
-                   #print "2 pad bytes"
                elif adjustedblocklength%4 == 3:
-                   #print "1 pad byte"
                    adjustedblocklength += 1
                else:
                    pass
@@ -566,13 +546,6 @@ class RawPcapReader(BasePcapReader):
                    if myblockheader.blockType == 6:
                       ehb = self.ReadEnhancedPacketBlock(myblockheader,datablock)
                       self.ntarehblist.append(ehb)
-                      #print "Adding to list: now at " + str(len(self.ntarehblist))
-                  
-                       # enhanced packet block
-               
-               #else:
-                   #self.f.read(adjustedblocklength-8)
-               #    self.f.read(min(adjustedblocklength-8,4096))
 
                myblockheader = self.ReadBlockHeader()
                 
